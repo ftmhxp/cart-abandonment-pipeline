@@ -1,0 +1,5 @@
+.env
+credentials/
+spark-ivy/
+__pycache__/
+*.pyc
