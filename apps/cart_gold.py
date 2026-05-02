@@ -6,17 +6,16 @@ from pyspark.sql.functions import (
 )
 
 import os
-from dotenv import load_dotenv
-load_dotenv()
 
 GCS_SILVER         = "gs://cart-pipeline-lake/silver/cart_events"
 GCS_GOLD_ABANDONED = "gs://cart-pipeline-lake/gold/abandoned_carts"
 GCS_GOLD_HOURLY    = "gs://cart-pipeline-lake/gold/hourly_stats"
 BQ_DATASET         = "cart_pipeline"
 BQ_TEMP_BUCKET     = "cart-pipeline-lake"
+BQ_PROJECT         = "project-16d9dcf7-d9a8-4c74-b35"
 IVY_DIR            = "/tmp/.ivy"
 
-ABANDONMENT_WINDOW_MINUTES = int(os.getenv("ABANDONMENT_WINDOW_MINUTES", "30"))
+ABANDONMENT_WINDOW_MINUTES = int(os.getenv("ABANDONMENT_WINDOW_MINUTES", "0"))
 
 spark = (
     SparkSession.builder
@@ -59,16 +58,18 @@ session_agg = (
 )
 
 # Abandoned = has add_to_cart AND no checkout_complete
-#             AND inactive for >= ABANDONMENT_WINDOW_MINUTES
+#             AND inactive for >= ABANDONMENT_WINDOW_MINUTES (skipped when 0)
+time_filter = (
+    (col("last_event_time").cast("long") - col("first_add_time").cast("long")) / 60
+    >= ABANDONMENT_WINDOW_MINUTES
+) if ABANDONMENT_WINDOW_MINUTES > 0 else lit(True)
+
 abandoned_carts = (
     session_agg
     .filter(
         (col("add_count") > 0) &
         (col("checkout_count") == 0) &
-        (
-            (col("last_event_time").cast("long") - col("first_add_time").cast("long")) / 60
-            >= ABANDONMENT_WINDOW_MINUTES
-        )
+        time_filter
     )
     .select(
         col("session_id"),
@@ -108,8 +109,9 @@ print(f"[gold] Abandoned carts:  {total_abandoned:,}")
 (
     abandoned_carts.write
     .format("bigquery")
-    .option("table",           f"{BQ_DATASET}.abandoned_carts")
+    .option("table",              f"{BQ_DATASET}.abandoned_carts")
     .option("temporaryGcsBucket", BQ_TEMP_BUCKET)
+    .option("parentProject",      BQ_PROJECT)
     .mode("overwrite")
     .save()
 )
@@ -191,6 +193,7 @@ hourly_stats = (
     .format("bigquery")
     .option("table",              f"{BQ_DATASET}.hourly_stats")
     .option("temporaryGcsBucket", BQ_TEMP_BUCKET)
+    .option("parentProject",      BQ_PROJECT)
     .mode("overwrite")
     .save()
 )
