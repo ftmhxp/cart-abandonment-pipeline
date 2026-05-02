@@ -5,6 +5,10 @@ from pyspark.sql.functions import (
     when
 )
 
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
 GCS_SILVER         = "gs://cart-pipeline-lake/silver/cart_events"
 GCS_GOLD_ABANDONED = "gs://cart-pipeline-lake/gold/abandoned_carts"
 GCS_GOLD_HOURLY    = "gs://cart-pipeline-lake/gold/hourly_stats"
@@ -12,7 +16,7 @@ BQ_DATASET         = "cart_pipeline"
 BQ_TEMP_BUCKET     = "cart-pipeline-lake"
 IVY_DIR            = "/tmp/.ivy"
 
-ABANDONMENT_WINDOW_MINUTES = 30
+ABANDONMENT_WINDOW_MINUTES = int(os.getenv("ABANDONMENT_WINDOW_MINUTES", "30"))
 
 spark = (
     SparkSession.builder
