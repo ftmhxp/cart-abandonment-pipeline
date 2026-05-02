@@ -3,3 +3,10 @@ credentials/
 spark-ivy/
 __pycache__/
 *.pyc
+
+# Terraform
+infra/terraform.tfvars
+infra/.terraform/
+infra/*.tfstate
+infra/*.tfstate.backup
+infra/.terraform.lock.hcl

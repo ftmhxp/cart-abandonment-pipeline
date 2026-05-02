@@ -16,9 +16,8 @@ provider "google" {
 # ── Variables ──────────────────────────────────────────────────────────────────
 
 variable "project_id" {
-  description = "GCP project ID"
+  description = "GCP project ID (set in terraform.tfvars)"
   type        = string
-  default     = "cart-abandonment-prod"
 }
 
 variable "region" {
