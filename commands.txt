@@ -1,0 +1,219 @@
+================================================================================
+  CART ABANDONMENT PIPELINE — FULL RUN COMMANDS
+  Run top to bottom. Each section assumes the previous succeeded.
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+0. PRE-FLIGHT — HOST SETUP
+────────────────────────────────────────────────────────────────────────────────
+
+# Install Python dependencies (host only — producer runs on host)
+pip install -r requirements.txt
+
+# Copy your GCP service account key into credentials/
+cp /path/to/your/gcp-key.json credentials/gcp-key.json
+
+# Verify .env is populated
+cat .env
+
+────────────────────────────────────────────────────────────────────────────────
+1. TERRAFORM — PROVISION GCS + BIGQUERY
+────────────────────────────────────────────────────────────────────────────────
+
+cd infra
+terraform init
+terraform plan
+terraform apply -auto-approve
+cd ..
+
+────────────────────────────────────────────────────────────────────────────────
+2. DOCKER — START ALL CONTAINERS
+────────────────────────────────────────────────────────────────────────────────
+
+docker compose up -d
+
+# Verify all 4 containers are running
+docker compose ps
+
+# Wait for Kafka to be healthy (up to ~60s)
+docker compose logs kafka --follow
+# Ctrl-C once you see: "Kafka Server started"
+
+────────────────────────────────────────────────────────────────────────────────
+3. KAFKA — CREATE TOPIC
+────────────────────────────────────────────────────────────────────────────────
+
+docker exec kafka kafka-topics.sh \
+  --bootstrap-server localhost:9092 \
+  --create \
+  --topic cart-events \
+  --partitions 3 \
+  --replication-factor 1
+
+# Verify topic exists
+docker exec kafka kafka-topics.sh \
+  --bootstrap-server localhost:9092 \
+  --list
+
+# Kafka UI (optional, browser)
+# http://localhost:8090
+
+────────────────────────────────────────────────────────────────────────────────
+4. PRODUCER — START PUBLISHING EVENTS (HOST)
+────────────────────────────────────────────────────────────────────────────────
+
+# Run in its own terminal — leave it running
+python producer/cart_producer.py
+
+# Expected output:
+# [producer] Connected to localhost:29092, publishing to 'cart-events'
+# [session     1] page_view            user=...  product=...
+
+────────────────────────────────────────────────────────────────────────────────
+5. BRONZE — START STREAMING JOB (runs until you Ctrl-C)
+────────────────────────────────────────────────────────────────────────────────
+
+# Run in its own terminal — leave it running alongside the producer
+docker exec spark-master /opt/spark/bin/spark-submit \
+  --master spark://spark-master:7077 \
+  --packages io.delta:delta-spark_2.12:3.2.0,org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,com.google.cloud.bigdataoss:gcs-connector:hadoop3-2.2.19,com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.36.1 \
+  --conf spark.jars.ivy=/tmp/.ivy \
+  --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension \
+  --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog \
+  --conf spark.hadoop.fs.gs.impl=com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem \
+  --conf spark.hadoop.fs.AbstractFileSystem.gs.impl=com.google.cloud.hadoop.fs.gcs.GoogleHadoopFS \
+  --conf spark.hadoop.google.cloud.auth.service.account.json.keyfile=/opt/credentials/gcp-key.json \
+  /opt/spark-apps/cart_bronze.py
+
+# Expected output:
+# [bronze] Streaming to gs://cart-pipeline-lake/bronze/cart_events — waiting for data...
+# Spark UI: http://localhost:8080
+
+# Let bronze run for at least 2-3 minutes to accumulate data before running silver.
+
+────────────────────────────────────────────────────────────────────────────────
+6. SILVER — RUN BATCH JOB
+────────────────────────────────────────────────────────────────────────────────
+
+docker exec spark-master /opt/spark/bin/spark-submit \
+  --master spark://spark-master:7077 \
+  --packages io.delta:delta-spark_2.12:3.2.0,org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,com.google.cloud.bigdataoss:gcs-connector:hadoop3-2.2.19,com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.36.1 \
+  --conf spark.jars.ivy=/tmp/.ivy \
+  --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension \
+  --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog \
+  --conf spark.hadoop.fs.gs.impl=com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem \
+  --conf spark.hadoop.fs.AbstractFileSystem.gs.impl=com.google.cloud.hadoop.fs.gcs.GoogleHadoopFS \
+  --conf spark.hadoop.google.cloud.auth.service.account.json.keyfile=/opt/credentials/gcp-key.json \
+  /opt/spark-apps/cart_silver.py
+
+# Expected output:
+# [silver] Bronze row count: X,XXX
+# [silver] After parse:     X,XXX
+# [silver] After null drop: X,XXX  (dropped X)
+# [silver] After dedup:     X,XXX  (dropped X)
+# [silver] Written X,XXX rows to gs://cart-pipeline-lake/silver/cart_events
+
+────────────────────────────────────────────────────────────────────────────────
+7. GOLD — RUN BATCH JOB
+────────────────────────────────────────────────────────────────────────────────
+
+docker exec spark-master /opt/spark/bin/spark-submit \
+  --master spark://spark-master:7077 \
+  --packages io.delta:delta-spark_2.12:3.2.0,org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,com.google.cloud.bigdataoss:gcs-connector:hadoop3-2.2.19,com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.36.1 \
+  --conf spark.jars.ivy=/tmp/.ivy \
+  --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension \
+  --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog \
+  --conf spark.hadoop.fs.gs.impl=com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem \
+  --conf spark.hadoop.fs.AbstractFileSystem.gs.impl=com.google.cloud.hadoop.fs.gcs.GoogleHadoopFS \
+  --conf spark.hadoop.google.cloud.auth.service.account.json.keyfile=/opt/credentials/gcp-key.json \
+  /opt/spark-apps/cart_gold.py
+
+# Expected output:
+# [gold] Silver row count: X,XXX
+# [gold] Abandoned carts:  X,XXX
+# [gold] abandoned_carts written to GCS + BigQuery
+# [gold] hourly_stats written to GCS + BigQuery
+# [gold] ── Pipeline Summary ─────────────────────────
+# [gold]   Total sessions:    X,XXX
+# [gold]   Abandoned:         X,XXX
+# [gold]   Converted:           XXX
+# [gold]   Abandonment rate:   XX.X%
+
+────────────────────────────────────────────────────────────────────────────────
+8. VERIFY — GCS
+────────────────────────────────────────────────────────────────────────────────
+
+# List all three layers
+gsutil ls gs://cart-pipeline-lake/bronze/cart_events/
+gsutil ls gs://cart-pipeline-lake/silver/cart_events/
+gsutil ls gs://cart-pipeline-lake/gold/abandoned_carts/
+gsutil ls gs://cart-pipeline-lake/gold/hourly_stats/
+
+# Count files in bronze (Delta parquet files)
+gsutil ls -r gs://cart-pipeline-lake/bronze/cart_events/ | grep ".parquet" | wc -l
+
+────────────────────────────────────────────────────────────────────────────────
+9. VERIFY — BIGQUERY
+────────────────────────────────────────────────────────────────────────────────
+
+# Row counts
+bq query --use_legacy_sql=false \
+  'SELECT COUNT(*) AS total FROM cart_pipeline.abandoned_carts'
+
+bq query --use_legacy_sql=false \
+  'SELECT COUNT(*) AS total FROM cart_pipeline.hourly_stats'
+
+# Top abandoned carts by value
+bq query --use_legacy_sql=false \
+  'SELECT session_id, user_id, cart_value, minutes_inactive, abandoned_at
+   FROM cart_pipeline.abandoned_carts
+   ORDER BY cart_value DESC
+   LIMIT 10'
+
+# Hourly abandonment breakdown
+bq query --use_legacy_sql=false \
+  'SELECT hour, total_sessions, abandoned_sessions, abandonment_rate, revenue_lost
+   FROM cart_pipeline.hourly_stats
+   ORDER BY hour'
+
+────────────────────────────────────────────────────────────────────────────────
+10. DOCKER UTILITY COMMANDS
+────────────────────────────────────────────────────────────────────────────────
+
+# View logs
+docker compose logs kafka
+docker compose logs spark-master
+docker compose logs spark-worker
+
+# Follow logs live
+docker compose logs -f kafka
+
+# Shell into a container
+docker exec -it kafka bash
+docker exec -it spark-master bash
+
+# Consume Kafka topic (debug)
+docker exec kafka kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 \
+  --topic cart-events \
+  --from-beginning \
+  --max-messages 5
+
+# Check Kafka consumer groups
+docker exec kafka kafka-consumer-groups.sh \
+  --bootstrap-server localhost:9092 \
+  --list
+
+# Stop everything
+docker compose down
+
+# Stop and wipe volumes (full reset)
+docker compose down -v
+
+================================================================================
+  UIs
+  Spark Master:  http://localhost:8080
+  Spark Worker:  http://localhost:8081
+  Spark App UI:  http://localhost:4040  (only while a job is running)
+  Kafka UI:      http://localhost:8090
+================================================================================
