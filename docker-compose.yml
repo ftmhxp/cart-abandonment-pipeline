@@ -1,0 +1,93 @@
+version: "3.8"
+
+networks:
+  pipeline-net:
+    driver: bridge
+
+services:
+
+  # ─────────────────────────────────────────
+  # Kafka (KRaft mode — no Zookeeper)
+  # ─────────────────────────────────────────
+  kafka:
+    image: apache/kafka:latest
+    container_name: kafka
+    ports:
+      - "9092:9092"    # internal (Spark → Kafka inside Docker)
+      - "29092:29092"  # external (producer on host → Kafka)
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+    networks:
+      - pipeline-net
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ─────────────────────────────────────────
+  # Kafka UI  (localhost:8090)
+  # ─────────────────────────────────────────
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "8090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - pipeline-net
+
+  # ─────────────────────────────────────────
+  # Spark Master  (UI: localhost:8080, RPC: 7077)
+  # ─────────────────────────────────────────
+  spark-master:
+    image: apache/spark:3.5.1
+    container_name: spark-master
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    volumes:
+      - ./apps:/opt/spark-apps
+      - ./spark-ivy:/tmp/.ivy
+      - ./credentials:/opt/credentials
+    networks:
+      - pipeline-net
+
+  # ─────────────────────────────────────────
+  # Spark Worker  (UI: localhost:8081, App UI: 4040)
+  # ─────────────────────────────────────────
+  spark-worker:
+    image: apache/spark:3.5.1
+    container_name: spark-worker
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    ports:
+      - "8081:8081"
+      - "4040:4040"
+    environment:
+      GOOGLE_APPLICATION_CREDENTIALS: /opt/credentials/gcp-key.json
+    volumes:
+      - ./apps:/opt/spark-apps
+      - ./spark-ivy:/tmp/.ivy
+      - ./credentials:/opt/credentials
+    depends_on:
+      - spark-master
+    networks:
+      - pipeline-net
